@@ -11,7 +11,8 @@ export type McpAuthType = 'workspace_oauth' | 'workspace_bearer' | 'public';
 export interface Workspace {
   id: string;
   name: string;            // Read from workspace folder config (not stored in global config)
-  rootPath: string;        // Absolute path to workspace folder (e.g., ~/Projects/my-app/craft-agent)
+  rootPath: string;        // The repo/project directory the agent works in (e.g., ~/Projects/my-app)
+  storagePath?: string;    // Where Craft stores metadata (sessions, config, etc.) — defaults to ~/.craft-agent/workspaces/{id}/
   createdAt: number;
   lastAccessedAt?: number; // For sorting recent workspaces
   iconUrl?: string;

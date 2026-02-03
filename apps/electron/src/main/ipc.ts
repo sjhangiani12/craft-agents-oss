@@ -19,6 +19,20 @@ import { getCredentialManager } from '@craft-agent/shared/credentials'
 import { MarkItDown } from 'markitdown-js'
 
 /**
+ * Get the storage path for a workspace.
+ * Storage path is where Craft stores metadata (sessions, sources, config, etc.)
+ * This is always ~/.craft-agent/workspaces/{id}/ — never pollutes the user's repo.
+ *
+ * @param workspace - The workspace object
+ * @returns The storage path for the workspace
+ */
+function getWorkspaceStoragePath(workspace: Workspace): string {
+  // Use storagePath if available (new workspaces have this set)
+  // Otherwise fall back to ~/.craft-agent/workspaces/{id}/ for migration
+  return workspace.storagePath || join(homedir(), '.craft-agent', 'workspaces', workspace.id)
+}
+
+/**
  * Sanitizes a filename to prevent path traversal and filesystem issues.
  * Removes dangerous characters and limits length.
  */
@@ -150,7 +164,7 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
     if (workspaceId) {
       const workspace = getWorkspaceByNameOrId(workspaceId)
       if (workspace) {
-        sessionManager.setupConfigWatcher(workspace.rootPath, workspaceId)
+        sessionManager.setupConfigWatcher(getWorkspaceStoragePath(workspace), workspaceId)
       }
     }
     return workspaceId
@@ -213,7 +227,7 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
     // Set up ConfigWatcher for the new workspace
     const workspace = getWorkspaceByNameOrId(workspaceId)
     if (workspace) {
-      sessionManager.setupConfigWatcher(workspace.rootPath, workspaceId)
+      sessionManager.setupConfigWatcher(getWorkspaceStoragePath(workspace), workspaceId)
     }
     end()
   })
@@ -538,10 +552,10 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
       if (!workspace) {
         throw new Error(`Workspace not found: ${workspaceId}`)
       }
-      const workspaceRootPath = workspace.rootPath
+      const storagePath = getWorkspaceStoragePath(workspace)
 
-      // Create attachments directory if it doesn't exist
-      const attachmentsDir = getSessionAttachmentsPath(workspaceRootPath, sessionId)
+      // Create attachments directory if it doesn't exist (in storagePath)
+      const attachmentsDir = getSessionAttachmentsPath(storagePath, sessionId)
       await mkdir(attachmentsDir, { recursive: true })
 
       // Generate unique ID for this attachment
@@ -1467,7 +1481,7 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
 
     // Load workspace config
     const { loadWorkspaceConfig } = await import('@craft-agent/shared/workspaces')
-    const config = loadWorkspaceConfig(workspace.rootPath)
+    const config = loadWorkspaceConfig(getWorkspaceStoragePath(workspace))
 
     return {
       name: config?.name,
@@ -1492,7 +1506,7 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
     }
 
     const { loadWorkspaceConfig, saveWorkspaceConfig } = await import('@craft-agent/shared/workspaces')
-    const config = loadWorkspaceConfig(workspace.rootPath)
+    const config = loadWorkspaceConfig(getWorkspaceStoragePath(workspace))
     if (!config) {
       throw new Error(`Failed to load workspace config: ${workspaceId}`)
     }
@@ -1511,7 +1525,7 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
     }
 
     // Save the config
-    saveWorkspaceConfig(workspace.rootPath, config)
+    saveWorkspaceConfig(getWorkspaceStoragePath(workspace), config)
     ipcLog.info(`Workspace setting updated: ${key} = ${JSON.stringify(value)}`)
   })
 
@@ -1747,7 +1761,7 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
       ipcLog.error(`SOURCES_GET: Workspace not found: ${workspaceId}`)
       return []
     }
-    return loadWorkspaceSources(workspace.rootPath)
+    return loadWorkspaceSources(getWorkspaceStoragePath(workspace))
   })
 
   // Create a new source
@@ -1755,7 +1769,7 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
     const workspace = getWorkspaceByNameOrId(workspaceId)
     if (!workspace) throw new Error(`Workspace not found: ${workspaceId}`)
     const { createSource } = await import('@craft-agent/shared/sources')
-    return createSource(workspace.rootPath, {
+    return createSource(getWorkspaceStoragePath(workspace), {
       name: config.name || 'New Source',
       provider: config.provider || 'custom',
       type: config.type || 'mcp',
@@ -1771,7 +1785,7 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
     const workspace = getWorkspaceByNameOrId(workspaceId)
     if (!workspace) throw new Error(`Workspace not found: ${workspaceId}`)
     const { deleteSource } = await import('@craft-agent/shared/sources')
-    deleteSource(workspace.rootPath, sourceSlug)
+    deleteSource(getWorkspaceStoragePath(workspace), sourceSlug)
   })
 
   // Start OAuth flow for a source
@@ -1783,7 +1797,7 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
       }
       const { loadSource, getSourceCredentialManager } = await import('@craft-agent/shared/sources')
 
-      const source = loadSource(workspace.rootPath, sourceSlug)
+      const source = loadSource(getWorkspaceStoragePath(workspace), sourceSlug)
       if (!source || source.config.type !== 'mcp' || !source.config.mcp?.url) {
         return { success: false, error: 'Source not found or not an MCP source' }
       }
@@ -1818,7 +1832,7 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
     if (!workspace) throw new Error(`Workspace not found: ${workspaceId}`)
     const { loadSource, getSourceCredentialManager } = await import('@craft-agent/shared/sources')
 
-    const source = loadSource(workspace.rootPath, sourceSlug)
+    const source = loadSource(getWorkspaceStoragePath(workspace), sourceSlug)
     if (!source) {
       throw new Error(`Source not found: ${sourceSlug}`)
     }
@@ -1838,7 +1852,7 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
     // Load raw JSON file (not normalized) for UI display
     const { existsSync, readFileSync } = await import('fs')
     const { getSourcePermissionsPath } = await import('@craft-agent/shared/agent')
-    const path = getSourcePermissionsPath(workspace.rootPath, sourceSlug)
+    const path = getSourcePermissionsPath(getWorkspaceStoragePath(workspace), sourceSlug)
 
     if (!existsSync(path)) return null
 
@@ -1859,7 +1873,7 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
     // Load raw JSON file (not normalized) for UI display
     const { existsSync, readFileSync } = await import('fs')
     const { getWorkspacePermissionsPath } = await import('@craft-agent/shared/agent')
-    const path = getWorkspacePermissionsPath(workspace.rootPath)
+    const path = getWorkspacePermissionsPath(getWorkspaceStoragePath(workspace))
 
     if (!existsSync(path)) return null
 
@@ -1898,7 +1912,7 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
 
     try {
       // Load source config
-      const sources = await loadWorkspaceSources(workspace.rootPath)
+      const sources = await loadWorkspaceSources(getWorkspaceStoragePath(workspace))
       const source = sources.find(s => s.config.slug === sourceSlug)
       if (!source) return { success: false, error: 'Source not found' }
       if (source.config.type !== 'mcp') return { success: false, error: 'Source is not an MCP server' }
@@ -1961,11 +1975,11 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
 
       // Load permissions patterns
       const { loadSourcePermissionsConfig, permissionsConfigCache } = await import('@craft-agent/shared/agent')
-      const permissionsConfig = loadSourcePermissionsConfig(workspace.rootPath, sourceSlug)
+      const permissionsConfig = loadSourcePermissionsConfig(getWorkspaceStoragePath(workspace), sourceSlug)
 
       // Get merged permissions config
       const mergedConfig = permissionsConfigCache.getMergedConfig({
-        workspaceRootPath: workspace.rootPath,
+        workspaceRootPath: getWorkspaceStoragePath(workspace),
         activeSourceSlugs: [sourceSlug],
       })
 
@@ -2013,7 +2027,7 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
     const { searchSessions } = await import('./search')
     const { getWorkspaceSessionsPath } = await import('@craft-agent/shared/workspaces')
 
-    const sessionsDir = getWorkspaceSessionsPath(workspace.rootPath)
+    const sessionsDir = getWorkspaceSessionsPath(getWorkspaceStoragePath(workspace))
     ipcLog.debug(`SEARCH_SESSIONS: Searching "${query}" in ${sessionsDir}`)
 
     const results = await searchSessions(query, sessionsDir, {
@@ -2047,8 +2061,9 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
       return []
     }
     const { loadWorkspaceSkills } = await import('@craft-agent/shared/skills')
-    const skills = loadWorkspaceSkills(workspace.rootPath)
-    ipcLog.info(`SKILLS_GET: Loaded ${skills.length} skills from ${workspace.rootPath}`)
+    const storagePath = getWorkspaceStoragePath(workspace)
+    const skills = loadWorkspaceSkills(storagePath)
+    ipcLog.info(`SKILLS_GET: Loaded ${skills.length} skills from ${storagePath}`)
     return skills
   })
 
@@ -2064,7 +2079,7 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
     const { readdirSync, statSync } = await import('fs')
     const { getWorkspaceSkillsPath } = await import('@craft-agent/shared/workspaces')
 
-    const skillsDir = getWorkspaceSkillsPath(workspace.rootPath)
+    const skillsDir = getWorkspaceSkillsPath(getWorkspaceStoragePath(workspace))
     const skillDir = join(skillsDir, skillSlug)
 
     interface SkillFile {
@@ -2116,7 +2131,7 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
     if (!workspace) throw new Error('Workspace not found')
 
     const { deleteSkill } = await import('@craft-agent/shared/skills')
-    deleteSkill(workspace.rootPath, skillSlug)
+    deleteSkill(getWorkspaceStoragePath(workspace), skillSlug)
     ipcLog.info(`Deleted skill: ${skillSlug}`)
   })
 
@@ -2129,7 +2144,7 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
     const { shell } = await import('electron')
     const { getWorkspaceSkillsPath } = await import('@craft-agent/shared/workspaces')
 
-    const skillsDir = getWorkspaceSkillsPath(workspace.rootPath)
+    const skillsDir = getWorkspaceSkillsPath(getWorkspaceStoragePath(workspace))
     const skillFile = join(skillsDir, skillSlug, 'SKILL.md')
     await shell.openPath(skillFile)
   })
@@ -2143,7 +2158,7 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
     const { shell } = await import('electron')
     const { getWorkspaceSkillsPath } = await import('@craft-agent/shared/workspaces')
 
-    const skillsDir = getWorkspaceSkillsPath(workspace.rootPath)
+    const skillsDir = getWorkspaceSkillsPath(getWorkspaceStoragePath(workspace))
     const skillDir = join(skillsDir, skillSlug)
     await shell.showItemInFolder(skillDir)
   })
@@ -2158,7 +2173,7 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
     if (!workspace) throw new Error('Workspace not found')
 
     const { listStatuses } = await import('@craft-agent/shared/statuses')
-    return listStatuses(workspace.rootPath)
+    return listStatuses(getWorkspaceStoragePath(workspace))
   })
 
   // Reorder statuses (drag-and-drop). Receives new ordered array of status IDs.
@@ -2168,7 +2183,7 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
     if (!workspace) throw new Error('Workspace not found')
 
     const { reorderStatuses } = await import('@craft-agent/shared/statuses')
-    reorderStatuses(workspace.rootPath, orderedIds)
+    reorderStatuses(getWorkspaceStoragePath(workspace), orderedIds)
   })
 
   // ============================================================
@@ -2181,7 +2196,7 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
     if (!workspace) throw new Error('Workspace not found')
 
     const { listLabels } = await import('@craft-agent/shared/labels/storage')
-    return listLabels(workspace.rootPath)
+    return listLabels(getWorkspaceStoragePath(workspace))
   })
 
   // Create a new label in a workspace
@@ -2190,7 +2205,7 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
     if (!workspace) throw new Error('Workspace not found')
 
     const { createLabel } = await import('@craft-agent/shared/labels/crud')
-    const label = createLabel(workspace.rootPath, input)
+    const label = createLabel(getWorkspaceStoragePath(workspace), input)
     windowManager.broadcastToAll(IPC_CHANNELS.LABELS_CHANGED, workspaceId)
     return label
   })
@@ -2201,7 +2216,7 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
     if (!workspace) throw new Error('Workspace not found')
 
     const { deleteLabel } = await import('@craft-agent/shared/labels/crud')
-    const result = deleteLabel(workspace.rootPath, labelId)
+    const result = deleteLabel(getWorkspaceStoragePath(workspace), labelId)
     windowManager.broadcastToAll(IPC_CHANNELS.LABELS_CHANGED, workspaceId)
     return result
   })
@@ -2212,7 +2227,7 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
     if (!workspace) throw new Error('Workspace not found')
 
     const { listViews } = await import('@craft-agent/shared/views/storage')
-    return listViews(workspace.rootPath)
+    return listViews(getWorkspaceStoragePath(workspace))
   })
 
   // Save views (replaces full array)
@@ -2221,7 +2236,7 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
     if (!workspace) throw new Error('Workspace not found')
 
     const { saveViews } = await import('@craft-agent/shared/views/storage')
-    saveViews(workspace.rootPath, views)
+    saveViews(getWorkspaceStoragePath(workspace), views)
     // Broadcast labels changed since views are used alongside labels in sidebar
     windowManager.broadcastToAll(IPC_CHANNELS.LABELS_CHANGED, workspaceId)
   })

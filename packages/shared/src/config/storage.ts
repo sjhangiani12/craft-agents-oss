@@ -116,6 +116,12 @@ export function loadStoredConfig(): StoredConfig | null {
     // Expand path variables (~ and ${HOME}) for portability
     for (const workspace of config.workspaces) {
       workspace.rootPath = expandPath(workspace.rootPath);
+      if (workspace.storagePath) {
+        workspace.storagePath = expandPath(workspace.storagePath);
+      } else {
+        // Migration: set storagePath for workspaces that don't have it
+        workspace.storagePath = join(CONFIG_DIR, 'workspaces', workspace.id);
+      }
     }
 
     // Validate active workspace exists
@@ -125,10 +131,11 @@ export function loadStoredConfig(): StoredConfig | null {
       config.activeWorkspaceId = config.workspaces[0]?.id || null;
     }
 
-    // Ensure workspace folder structure exists for all workspaces
+    // Ensure workspace folder structure exists for all workspaces at storagePath
     for (const workspace of config.workspaces) {
-      if (!isValidWorkspace(workspace.rootPath)) {
-        createWorkspaceAtPath(workspace.rootPath, workspace.name);
+      const storagePath = workspace.storagePath!;
+      if (!isValidWorkspace(storagePath)) {
+        createWorkspaceAtPath(storagePath, workspace.name);
       }
     }
 
@@ -165,6 +172,7 @@ export function saveConfig(config: StoredConfig): void {
     workspaces: config.workspaces.map(ws => ({
       ...ws,
       rootPath: toPortablePath(ws.rootPath),
+      storagePath: ws.storagePath ? toPortablePath(ws.storagePath) : undefined,
     })),
   };
 
@@ -386,12 +394,13 @@ export function getWorkspaces(): Workspace[] {
 
   // Resolve workspace names from folder config and local icons
   return workspaces.map(w => {
-    // Read name from workspace folder config (single source of truth)
-    const wsConfig = loadWorkspaceConfig(w.rootPath);
+    // Read name from workspace folder config at storagePath (single source of truth)
+    const storagePath = w.storagePath || join(CONFIG_DIR, 'workspaces', w.id);
+    const wsConfig = loadWorkspaceConfig(storagePath);
     const name = wsConfig?.name || w.rootPath.split('/').pop() || 'Untitled';
 
     // If workspace has a stored iconUrl that's a remote URL, use it
-    // Otherwise check for local icon file
+    // Otherwise check for local icon file in the user's repo (rootPath)
     let iconUrl = w.iconUrl;
     if (!iconUrl || (!iconUrl.startsWith('http://') && !iconUrl.startsWith('https://'))) {
       const localIcon = findWorkspaceIcon(w.rootPath);
@@ -407,7 +416,7 @@ export function getWorkspaces(): Workspace[] {
       }
     }
 
-    return { ...w, name, iconUrl };
+    return { ...w, name, iconUrl, storagePath };
   });
 }
 
@@ -456,22 +465,29 @@ export async function switchWorkspaceAtomic(workspaceId: string): Promise<{ work
   const workspace = config.workspaces.find(w => w.id === workspaceId);
   if (!workspace) return null;
 
-  // Get or create the latest session for this workspace
-  const session = await getOrCreateLatestSession(workspace.rootPath);
+  // Ensure storagePath is set (migration for older workspaces)
+  const storagePath = workspace.storagePath || join(CONFIG_DIR, 'workspaces', workspace.id);
+
+  // Get or create the latest session for this workspace (using storagePath for metadata)
+  const session = await getOrCreateLatestSession(storagePath);
 
   // Update active workspace in config
   config.activeWorkspaceId = workspaceId;
   workspace.lastAccessedAt = Date.now();
   saveConfig(config);
 
-  return { workspace, session };
+  return { workspace: { ...workspace, storagePath }, session };
 }
 
 /**
  * Add a workspace to the global config.
  * @param workspace - Workspace data (must include rootPath)
+ *
+ * Storage separation:
+ * - rootPath: The user's repo/project directory (e.g., ~/Projects/my-app) — stays clean
+ * - storagePath: Where Craft stores metadata (always ~/.craft-agent/workspaces/{id}/)
  */
-export function addWorkspace(workspace: Omit<Workspace, 'id' | 'createdAt'>): Workspace {
+export function addWorkspace(workspace: Omit<Workspace, 'id' | 'createdAt' | 'storagePath'>): Workspace {
   const config = loadStoredConfig();
   if (!config) {
     throw new Error('No config found');
@@ -486,6 +502,7 @@ export function addWorkspace(workspace: Omit<Workspace, 'id' | 'createdAt'>): Wo
       ...workspace,
       id: existing.id,
       createdAt: existing.createdAt,
+      storagePath: existing.storagePath,
     };
     const existingIndex = config.workspaces.indexOf(existing);
     config.workspaces[existingIndex] = updated;
@@ -493,15 +510,21 @@ export function addWorkspace(workspace: Omit<Workspace, 'id' | 'createdAt'>): Wo
     return updated;
   }
 
+  const workspaceId = generateWorkspaceId();
+
+  // Storage path is always in ~/.craft-agent/workspaces/{id}/ — never pollutes user's repo
+  const storagePath = join(CONFIG_DIR, 'workspaces', workspaceId);
+
   const newWorkspace: Workspace = {
     ...workspace,
-    id: generateWorkspaceId(),
+    id: workspaceId,
+    storagePath,
     createdAt: Date.now(),
   };
 
-  // Create workspace folder structure if it doesn't exist
-  if (!isValidWorkspace(newWorkspace.rootPath)) {
-    createWorkspaceAtPath(newWorkspace.rootPath, newWorkspace.name);
+  // Create workspace folder structure at storagePath (not rootPath)
+  if (!isValidWorkspace(storagePath)) {
+    createWorkspaceAtPath(storagePath, newWorkspace.name);
   }
 
   config.workspaces.push(newWorkspace);
@@ -519,26 +542,37 @@ export function addWorkspace(workspace: Omit<Workspace, 'id' | 'createdAt'>): Wo
  * Sync workspaces by discovering workspaces in the default location
  * that aren't already tracked in the global config.
  * Call this on app startup.
+ *
+ * Note: This discovers workspaces in ~/.craft-agent/workspaces/ by their storagePath.
+ * The rootPath for discovered workspaces defaults to the storagePath if not specified.
  */
 export function syncWorkspaces(): void {
   const config = loadStoredConfig();
   if (!config) return;
 
   const discoveredPaths = discoverWorkspacesInDefaultLocation();
-  const trackedPaths = new Set(config.workspaces.map(w => w.rootPath));
+  // Track by storagePath now (not rootPath)
+  const trackedStoragePaths = new Set(
+    config.workspaces.map(w => w.storagePath || join(CONFIG_DIR, 'workspaces', w.id))
+  );
 
   let added = false;
-  for (const rootPath of discoveredPaths) {
-    if (trackedPaths.has(rootPath)) continue;
+  for (const storagePath of discoveredPaths) {
+    if (trackedStoragePaths.has(storagePath)) continue;
 
     // Load the workspace config to get name
-    const wsConfig = loadWorkspaceConfig(rootPath);
+    const wsConfig = loadWorkspaceConfig(storagePath);
     if (!wsConfig) continue;
 
+    const workspaceId = wsConfig.id || generateWorkspaceId();
+
     const newWorkspace: Workspace = {
-      id: wsConfig.id || generateWorkspaceId(),
+      id: workspaceId,
       name: wsConfig.name,
-      rootPath,
+      // rootPath defaults to storagePath for discovered workspaces
+      // User can update this later to point to their actual repo
+      rootPath: wsConfig.defaults?.workingDirectory || storagePath,
+      storagePath,
       createdAt: wsConfig.createdAt || Date.now(),
     };
 

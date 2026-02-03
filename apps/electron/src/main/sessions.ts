@@ -62,6 +62,20 @@ import { promisify } from 'util'
 const execFileAsync = promisify(execFile)
 
 /**
+ * Get the storage path for a workspace.
+ * Storage path is where Craft stores metadata (sessions, sources, config, etc.)
+ * This is always ~/.craft-agent/workspaces/{id}/ — never pollutes the user's repo.
+ *
+ * @param workspace - The workspace object
+ * @returns The storage path for the workspace
+ */
+function getWorkspaceStoragePath(workspace: Workspace): string {
+  // Use storagePath if available (new workspaces have this set)
+  // Otherwise fall back to ~/.craft-agent/workspaces/{id}/ for migration
+  return workspace.storagePath || join(homedir(), '.craft-agent', 'workspaces', workspace.id)
+}
+
+/**
  * Sanitize message content for use as session title.
  * Strips XML blocks (e.g. <edit_request>) and normalizes whitespace.
  */
@@ -633,9 +647,9 @@ export class SessionManager {
         sessionLog.info(`Sources list changed in ${workspaceRootPath} (${sources.length} sources)`)
         // Broadcast to UI
         this.broadcastSourcesChanged(sources)
-        // Reload sources for all sessions in this workspace
+        // Reload sources for all sessions in this workspace (compare by storagePath)
         for (const [_, managed] of this.sessions) {
-          if (managed.workspace.rootPath === workspaceRootPath) {
+          if (getWorkspaceStoragePath(managed.workspace) === workspaceRootPath) {
             await this.reloadSessionSources(managed)
           }
         }
@@ -645,9 +659,9 @@ export class SessionManager {
         // Broadcast updated list to UI
         const sources = loadWorkspaceSources(workspaceRootPath)
         this.broadcastSourcesChanged(sources)
-        // Reload sources for all sessions in this workspace
+        // Reload sources for all sessions in this workspace (compare by storagePath)
         for (const [_, managed] of this.sessions) {
-          if (managed.workspace.rootPath === workspaceRootPath) {
+          if (getWorkspaceStoragePath(managed.workspace) === workspaceRootPath) {
             await this.reloadSessionSources(managed)
           }
         }
@@ -810,11 +824,11 @@ export class SessionManager {
   private async reloadSessionSources(managed: ManagedSession): Promise<void> {
     if (!managed.agent) return  // No agent = nothing to update (fresh build on next message)
 
-    const workspaceRootPath = managed.workspace.rootPath
+    const storagePath = getWorkspaceStoragePath(managed.workspace)
     sessionLog.info(`Reloading sources for session ${managed.id}`)
 
     // Reload all sources from disk (craft-agents-docs is always available as MCP server)
-    const allSources = loadAllSources(workspaceRootPath)
+    const allSources = loadAllSources(storagePath)
     managed.agent.setAllSources(allSources)
 
     // Rebuild MCP and API servers for session's enabled sources
@@ -823,7 +837,7 @@ export class SessionManager {
       enabledSlugs.includes(s.config.slug) && s.config.enabled && s.config.isAuthenticated
     )
     // Pass session path so large API responses can be saved to session folder
-    const sessionPath = getSessionStoragePath(workspaceRootPath, managed.id)
+    const sessionPath = getSessionStoragePath(storagePath, managed.id)
     const { mcpServers, apiServers } = await buildServersFromSources(enabledSources, sessionPath)
     const intendedSlugs = enabledSources.map(s => s.config.slug)
     managed.agent.setSourceServers(mcpServers, apiServers, intendedSlugs)
@@ -963,10 +977,11 @@ export class SessionManager {
 
       // Iterate over each workspace and load its sessions
       for (const workspace of workspaces) {
-        const workspaceRootPath = workspace.rootPath
-        const sessionMetadata = listStoredSessions(workspaceRootPath)
-        // Load workspace config once per workspace for default working directory
-        const wsConfig = loadWorkspaceConfig(workspaceRootPath)
+        // Use storagePath for metadata storage operations (not rootPath which is the user's repo)
+        const storagePath = getWorkspaceStoragePath(workspace)
+        const sessionMetadata = listStoredSessions(storagePath)
+        // Load workspace config from storagePath for default working directory
+        const wsConfig = loadWorkspaceConfig(storagePath)
         const wsDefaultWorkingDir = wsConfig?.defaults?.workingDirectory
 
         for (const meta of sessionMetadata) {
@@ -1034,10 +1049,10 @@ export class SessionManager {
         m.role !== 'status'
       )
 
-      const workspaceRootPath = managed.workspace.rootPath
+      const storagePath = getWorkspaceStoragePath(managed.workspace)
       const storedSession: StoredSession = {
         id: managed.id,
-        workspaceRootPath,
+        workspaceRootPath: storagePath,  // Use storagePath for session storage
         name: managed.name,
         createdAt: managed.lastMessageAt,  // Approximate, will be overwritten if already exists
         lastUsedAt: Date.now(),
@@ -1132,8 +1147,8 @@ export class SessionManager {
 
     sessionLog.info(`Running OAuth flow for ${request.sourceSlug} (type: ${request.type})`)
 
-    // Find the source in workspace sources
-    const sources = loadWorkspaceSources(managed.workspace.rootPath)
+    // Find the source in workspace sources (from storagePath)
+    const sources = loadWorkspaceSources(getWorkspaceStoragePath(managed.workspace))
     const source = sources.find(s => s.config.slug === request.sourceSlug)
 
     if (!source) {
@@ -1295,10 +1310,9 @@ export class SessionManager {
     }
 
     try {
-      // Store credentials using existing workspace ID extraction pattern
+      // Store credentials using workspace ID
       const credManager = getCredentialManager()
-      // Extract workspace ID from root path (last segment of path)
-      const wsId = managed.workspace.rootPath.split('/').pop() || managed.workspace.id
+      const wsId = managed.workspace.id
 
       if (request.mode === 'basic') {
         // Store value as JSON string {username, password} - credential-manager.ts parses it for basic auth
@@ -1321,7 +1335,7 @@ export class SessionManager {
 
       // Update source config to mark as authenticated
       const { markSourceAuthenticated } = await import('@craft-agent/shared/sources')
-      markSourceAuthenticated(managed.workspace.rootPath, request.sourceSlug)
+      markSourceAuthenticated(getWorkspaceStoragePath(managed.workspace), request.sourceSlug)
 
       // Mark source as unseen so fresh guide is injected on next message
       if (managed.agent) {
@@ -1467,7 +1481,7 @@ export class SessionManager {
    * Internal: Load messages from disk storage into the managed session.
    */
   private async loadMessagesFromDisk(managed: ManagedSession): Promise<void> {
-    const storedSession = loadStoredSession(managed.workspace.rootPath, managed.id)
+    const storedSession = loadStoredSession(getWorkspaceStoragePath(managed.workspace), managed.id)
     if (storedSession) {
       managed.messages = (storedSession.messages || []).map(storedToMessage)
       managed.tokenUsage = storedSession.tokenUsage
@@ -1484,12 +1498,12 @@ export class SessionManager {
   }
 
   /**
-   * Get the filesystem path to a session's folder
+   * Get the filesystem path to a session's folder (in storagePath)
    */
   getSessionPath(sessionId: string): string | null {
     const managed = this.sessions.get(sessionId)
     if (!managed) return null
-    return getSessionStoragePath(managed.workspace.rootPath, sessionId)
+    return getSessionStoragePath(getWorkspaceStoragePath(managed.workspace), sessionId)
   }
 
   /**
@@ -1510,8 +1524,10 @@ export class SessionManager {
 
     // Get new session defaults from workspace config (with global fallback)
     // Options.permissionMode overrides the workspace default (used by EditPopover for auto-execute)
-    const workspaceRootPath = workspace.rootPath
-    const wsConfig = loadWorkspaceConfig(workspaceRootPath)
+    // Use storagePath for metadata storage, rootPath only for actual git/working directory operations
+    const storagePath = getWorkspaceStoragePath(workspace)
+    const workspaceRootPath = workspace.rootPath  // Only for git/worktree operations
+    const wsConfig = loadWorkspaceConfig(storagePath)
     const globalDefaults = loadConfigDefaults()
 
     // Read permission mode from workspace config, fallback to global defaults
@@ -1538,8 +1554,8 @@ export class SessionManager {
       resolvedWorkingDir = options.workingDirectory
     }
 
-    // Use storage layer to create and persist the session
-    const storedSession = await createStoredSession(workspaceRootPath, {
+    // Use storage layer to create and persist the session (at storagePath, not user's repo)
+    const storedSession = await createStoredSession(storagePath, {
       permissionMode: defaultPermissionMode,
       workingDirectory: resolvedWorkingDir,
       hidden: options?.hidden,
@@ -1606,8 +1622,8 @@ export class SessionManager {
             }
           }
 
-          // Persist worktree metadata
-          await updateSessionMetadata(workspaceRootPath, storedSession.id, {
+          // Persist worktree metadata (to storagePath)
+          await updateSessionMetadata(storagePath, storedSession.id, {
             worktreePath,
             worktreeBranch,
             allocatedPort,
@@ -1688,9 +1704,10 @@ export class SessionManager {
         systemPromptPreset: managed.systemPromptPreset,
         // Always pass session object - id is required for plan mode callbacks
         // sdkSessionId is optional and used for conversation resumption
+        // workspaceRootPath points to storagePath (where session files live, not user's repo)
         session: {
           id: managed.id,
-          workspaceRootPath: managed.workspace.rootPath,
+          workspaceRootPath: getWorkspaceStoragePath(managed.workspace),
           sdkSessionId: managed.sdkSessionId,
           createdAt: managed.lastMessageAt,
           lastUsedAt: managed.lastMessageAt,
@@ -1875,7 +1892,7 @@ export class SessionManager {
       managed.agent.onSourceActivationRequest = async (sourceSlug: string): Promise<boolean> => {
         sessionLog.info(`Source activation request for session ${managed.id}:`, sourceSlug)
 
-        const workspaceRootPath = managed.workspace.rootPath
+        const storagePath = getWorkspaceStoragePath(managed.workspace)
 
         // Check if source is already enabled
         if (managed.enabledSourceSlugs?.includes(sourceSlug)) {
@@ -1884,7 +1901,7 @@ export class SessionManager {
         }
 
         // Load the source to check if it exists and is ready
-        const sources = getSourcesBySlugs(workspaceRootPath, [sourceSlug])
+        const sources = getSourcesBySlugs(storagePath, [sourceSlug])
         if (sources.length === 0) {
           sessionLog.warn(`Source ${sourceSlug} not found in workspace`)
           return false
@@ -1916,9 +1933,9 @@ export class SessionManager {
         }
 
         // Build server configs for all enabled sources
-        const allEnabledSources = getSourcesBySlugs(workspaceRootPath, managed.enabledSourceSlugs || [])
+        const allEnabledSources = getSourcesBySlugs(storagePath, managed.enabledSourceSlugs || [])
         // Pass session path so large API responses can be saved to session folder
-        const sessionPath = getSessionStoragePath(workspaceRootPath, managed.id)
+        const sessionPath = getSessionStoragePath(storagePath, managed.id)
         const { mcpServers, apiServers, errors } = await buildServersFromSources(allEnabledSources, sessionPath)
 
         if (errors.length > 0) {
@@ -2021,7 +2038,7 @@ export class SessionManager {
   async setPendingPlanExecution(sessionId: string, planPath: string): Promise<void> {
     const managed = this.sessions.get(sessionId)
     if (managed) {
-      await setStoredPendingPlanExecution(managed.workspace.rootPath, sessionId, planPath)
+      await setStoredPendingPlanExecution(getWorkspaceStoragePath(managed.workspace), sessionId, planPath)
       sessionLog.info(`Session ${sessionId}: set pending plan execution for ${planPath}`)
     }
   }
@@ -2034,7 +2051,7 @@ export class SessionManager {
   async markCompactionComplete(sessionId: string): Promise<void> {
     const managed = this.sessions.get(sessionId)
     if (managed) {
-      await markStoredCompactionComplete(managed.workspace.rootPath, sessionId)
+      await markStoredCompactionComplete(getWorkspaceStoragePath(managed.workspace), sessionId)
       sessionLog.info(`Session ${sessionId}: compaction marked complete for pending plan`)
     }
   }
@@ -2047,7 +2064,7 @@ export class SessionManager {
   async clearPendingPlanExecution(sessionId: string): Promise<void> {
     const managed = this.sessions.get(sessionId)
     if (managed) {
-      await clearStoredPendingPlanExecution(managed.workspace.rootPath, sessionId)
+      await clearStoredPendingPlanExecution(getWorkspaceStoragePath(managed.workspace), sessionId)
       sessionLog.info(`Session ${sessionId}: cleared pending plan execution`)
     }
   }
@@ -2059,7 +2076,7 @@ export class SessionManager {
   getPendingPlanExecution(sessionId: string): { planPath: string; awaitingCompaction: boolean } | null {
     const managed = this.sessions.get(sessionId)
     if (!managed) return null
-    return getStoredPendingPlanExecution(managed.workspace.rootPath, sessionId)
+    return getStoredPendingPlanExecution(getWorkspaceStoragePath(managed.workspace), sessionId)
   }
 
   // ============================================
@@ -2082,7 +2099,7 @@ export class SessionManager {
 
     try {
       // Load session directly from disk (already in correct format)
-      const storedSession = loadStoredSession(managed.workspace.rootPath, sessionId)
+      const storedSession = loadStoredSession(getWorkspaceStoragePath(managed.workspace), sessionId)
       if (!storedSession) {
         return { success: false, error: 'Session file not found' }
       }
@@ -2107,8 +2124,7 @@ export class SessionManager {
       // Store shared info in session
       managed.sharedUrl = data.url
       managed.sharedId = data.id
-      const workspaceRootPath = managed.workspace.rootPath
-      await updateSessionMetadata(workspaceRootPath, sessionId, {
+      await updateSessionMetadata(getWorkspaceStoragePath(managed.workspace), sessionId, {
         sharedUrl: data.url,
         sharedId: data.id,
       })
@@ -2146,7 +2162,7 @@ export class SessionManager {
 
     try {
       // Load session directly from disk (already in correct format)
-      const storedSession = loadStoredSession(managed.workspace.rootPath, sessionId)
+      const storedSession = loadStoredSession(getWorkspaceStoragePath(managed.workspace), sessionId)
       if (!storedSession) {
         return { success: false, error: 'Session file not found' }
       }
@@ -2210,8 +2226,7 @@ export class SessionManager {
       // Clear shared info
       delete managed.sharedUrl
       delete managed.sharedId
-      const workspaceRootPath = managed.workspace.rootPath
-      await updateSessionMetadata(workspaceRootPath, sessionId, {
+      await updateSessionMetadata(getWorkspaceStoragePath(managed.workspace), sessionId, {
         sharedUrl: undefined,
         sharedId: undefined,
       })
@@ -2245,7 +2260,7 @@ export class SessionManager {
       throw new Error(`Session not found: ${sessionId}`)
     }
 
-    const workspaceRootPath = managed.workspace.rootPath
+    const storagePath = getWorkspaceStoragePath(managed.workspace)
     sessionLog.info(`Setting sources for session ${sessionId}:`, sourceSlugs)
 
     // Store the selection
@@ -2253,16 +2268,16 @@ export class SessionManager {
 
     // If agent exists, build and apply servers immediately
     if (managed.agent) {
-      const sources = getSourcesBySlugs(workspaceRootPath, sourceSlugs)
+      const sources = getSourcesBySlugs(storagePath, sourceSlugs)
       // Pass session path so large API responses can be saved to session folder
-      const sessionPath = getSessionStoragePath(workspaceRootPath, sessionId)
+      const sessionPath = getSessionStoragePath(storagePath, sessionId)
       const { mcpServers, apiServers, errors } = await buildServersFromSources(sources, sessionPath)
       if (errors.length > 0) {
         sessionLog.warn(`Source build errors:`, errors)
       }
 
       // Set all sources for context (agent sees full list with descriptions, including built-ins)
-      const allSources = loadAllSources(workspaceRootPath)
+      const allSources = loadAllSources(storagePath)
       managed.agent.setAllSources(allSources)
 
       // Set active source servers (tools are only available from these)
@@ -2369,8 +2384,7 @@ export class SessionManager {
 
     // Persist changes
     if (needsPersist) {
-      const workspaceRootPath = managed.workspace.rootPath
-      await updateSessionMetadata(workspaceRootPath, sessionId, updates)
+      await updateSessionMetadata(getWorkspaceStoragePath(managed.workspace), sessionId, updates)
     }
   }
 
@@ -2384,8 +2398,7 @@ export class SessionManager {
       managed.hasUnread = true
       managed.lastReadMessageId = undefined
       // Persist to disk
-      const workspaceRootPath = managed.workspace.rootPath
-      await updateSessionMetadata(workspaceRootPath, sessionId, { hasUnread: true, lastReadMessageId: undefined })
+      await updateSessionMetadata(getWorkspaceStoragePath(managed.workspace), sessionId, { hasUnread: true, lastReadMessageId: undefined })
     }
   }
 
@@ -2491,11 +2504,11 @@ export class SessionManager {
     if (managed) {
       managed.model = model ?? undefined
       // Persist to disk
-      await updateSessionMetadata(managed.workspace.rootPath, sessionId, { model: model ?? undefined })
+      await updateSessionMetadata(getWorkspaceStoragePath(managed.workspace), sessionId, { model: model ?? undefined })
       // Update agent model if it already exists (takes effect on next query)
       if (managed.agent) {
         // Fallback chain: session model > workspace default > global config > DEFAULT_MODEL
-        const wsConfig = loadWorkspaceConfig(managed.workspace.rootPath)
+        const wsConfig = loadWorkspaceConfig(getWorkspaceStoragePath(managed.workspace))
         const effectiveModel = model ?? wsConfig?.defaults?.model ?? loadStoredConfig()?.model ?? DEFAULT_MODEL
         const resolvedModel = resolveModelId(effectiveModel)
         managed.agent.setModel(resolvedModel)
@@ -2611,8 +2624,8 @@ export class SessionManager {
 
     this.sessions.delete(sessionId)
 
-    // Delete from disk too
-    deleteStoredSession(workspaceRootPath, sessionId)
+    // Delete from disk too (using storagePath for session storage)
+    deleteStoredSession(getWorkspaceStoragePath(managed.workspace), sessionId)
 
     // Notify all windows for this workspace that the session was deleted
     this.sendEvent({ type: 'session_deleted', sessionId }, managed.workspace.id)
@@ -2630,7 +2643,7 @@ export class SessionManager {
     // Clear any pending plan execution state when a new user message is sent.
     // This acts as a safety valve - if the user moves on, we don't want to
     // auto-execute an old plan later.
-    await clearStoredPendingPlanExecution(managed.workspace.rootPath, sessionId)
+    await clearStoredPendingPlanExecution(getWorkspaceStoragePath(managed.workspace), sessionId)
 
     // Ensure messages are loaded before we try to add new ones
     await this.ensureMessagesLoaded(managed)
@@ -2730,7 +2743,7 @@ export class SessionManager {
     // fresh and queued messages). Scans regex patterns configured on labels,
     // then merges any new matches into the session's label array.
     try {
-      const labelTree = listLabels(managed.workspace.rootPath)
+      const labelTree = listLabels(getWorkspaceStoragePath(managed.workspace))
       const autoMatches = evaluateAutoLabels(message, labelTree)
 
       if (autoMatches.length > 0) {
@@ -2786,17 +2799,17 @@ export class SessionManager {
     sendSpan.mark('agent.ready')
 
     // Always set all sources for context (even if none are enabled), including built-ins
-    const workspaceRootPath = managed.workspace.rootPath
-    const allSources = loadAllSources(workspaceRootPath)
+    const storagePath = getWorkspaceStoragePath(managed.workspace)
+    const allSources = loadAllSources(storagePath)
     agent.setAllSources(allSources)
     sendSpan.mark('sources.loaded')
 
     // Apply source servers if any are enabled
     if (managed.enabledSourceSlugs?.length) {
       // Always build server configs fresh (no caching - single source of truth)
-      const sources = getSourcesBySlugs(workspaceRootPath, managed.enabledSourceSlugs)
+      const sources = getSourcesBySlugs(storagePath, managed.enabledSourceSlugs)
       // Pass session path so large API responses can be saved to session folder
-      const sessionPath = getSessionStoragePath(workspaceRootPath, sessionId)
+      const sessionPath = getSessionStoragePath(storagePath, sessionId)
       const { mcpServers, apiServers, errors } = await buildServersFromSources(sources, sessionPath)
       if (errors.length > 0) {
         sessionLog.warn(`Source build errors:`, errors)
@@ -3050,7 +3063,7 @@ export class SessionManager {
         // User is not watching - mark as unread for NEW badge
         if (!managed.hasUnread) {
           managed.hasUnread = true
-          await updateSessionMetadata(managed.workspace.rootPath, sessionId, { hasUnread: true })
+          await updateSessionMetadata(getWorkspaceStoragePath(managed.workspace), sessionId, { hasUnread: true })
         }
       }
     }
@@ -3417,11 +3430,11 @@ To view this task's output:
 
         // Resolve tool display metadata (icon, displayName) for skills/sources
         // Only resolve when we have input (second event for SDK dual-event pattern)
-        const workspaceRootPath = managed.workspace.rootPath
+        const toolStartStoragePath = getWorkspaceStoragePath(managed.workspace)
         let toolDisplayMeta: ToolDisplayMeta | undefined
         if (formattedToolInput && Object.keys(formattedToolInput).length > 0) {
-          const allSources = loadAllSources(workspaceRootPath)
-          toolDisplayMeta = resolveToolDisplayMeta(event.toolName, formattedToolInput, workspaceRootPath, allSources)
+          const allSources = loadAllSources(toolStartStoragePath)
+          toolDisplayMeta = resolveToolDisplayMeta(event.toolName, formattedToolInput, toolStartStoragePath, allSources)
         }
 
         // Check if a message with this toolUseId already exists FIRST
@@ -3536,9 +3549,9 @@ To view this task's output:
           // without a prior tool_start. If tool_start arrives later, findToolMessage will
           // locate this message by toolUseId and update it with input/intent/displayMeta.
           sessionLog.info(`RESULT WITHOUT START: toolUseId=${event.toolUseId}, toolName=${toolName} (creating message from result)`)
-          const fallbackWorkspaceRootPath = managed.workspace.rootPath
-          const fallbackSources = loadAllSources(fallbackWorkspaceRootPath)
-          const fallbackToolDisplayMeta = resolveToolDisplayMeta(toolName, undefined, fallbackWorkspaceRootPath, fallbackSources)
+          const fallbackStoragePath = getWorkspaceStoragePath(managed.workspace)
+          const fallbackSources = loadAllSources(fallbackStoragePath)
+          const fallbackToolDisplayMeta = resolveToolDisplayMeta(toolName, undefined, fallbackStoragePath, fallbackSources)
 
           const toolMessage: Message = {
             id: generateMessageId(),
@@ -3631,7 +3644,7 @@ To view this task's output:
           // This is done here (backend) rather than in the renderer so it's
           // not affected by CMD+R during compaction. The frontend reload
           // recovery will see awaitingCompaction=false and trigger execution.
-          void markStoredCompactionComplete(managed.workspace.rootPath, sessionId)
+          void markStoredCompactionComplete(getWorkspaceStoragePath(managed.workspace), sessionId)
           sessionLog.info(`Session ${sessionId}: compaction complete, marked pending plan ready`)
 
           // Emit usage_update so the context count badge refreshes immediately

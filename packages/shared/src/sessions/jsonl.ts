@@ -144,6 +144,10 @@ export function createSessionHeader(session: StoredSession): SessionHeader {
     lastFinalMessageId: extractLastFinalMessageId(session.messages),
     // Hidden flag for mini-agent sessions (not shown in session list)
     hidden: session.hidden,
+    // Worktree isolation fields
+    worktreePath: session.worktreePath,
+    worktreeBranch: session.worktreeBranch,
+    allocatedPort: session.allocatedPort,
   };
 }
 

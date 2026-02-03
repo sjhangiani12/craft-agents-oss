@@ -108,6 +108,12 @@ export interface SessionConfig {
   };
   /** When true, session is hidden from session list (e.g., mini edit sessions) */
   hidden?: boolean;
+  /** Git worktree path (if session uses workspace isolation) */
+  worktreePath?: string;
+  /** Git branch name for this session's worktree */
+  worktreeBranch?: string;
+  /** Allocated port for this session (from .agents.json ports config) */
+  allocatedPort?: number;
 }
 
 /**
@@ -179,6 +185,12 @@ export interface SessionHeader {
   };
   /** When true, session is hidden from session list (e.g., mini edit sessions) */
   hidden?: boolean;
+  /** Git worktree path (if session uses workspace isolation) */
+  worktreePath?: string;
+  /** Git branch name for this session's worktree */
+  worktreeBranch?: string;
+  /** Allocated port for this session (from .agents.json ports config) */
+  allocatedPort?: number;
   // Pre-computed fields for fast list loading
   /** Number of messages in session */
   messageCount: number;
@@ -245,4 +257,10 @@ export interface SessionMetadata {
   tokenUsage?: SessionTokenUsage;
   /** When true, session is hidden from session list (e.g., mini edit sessions) */
   hidden?: boolean;
+  /** Git worktree path (if session uses workspace isolation) */
+  worktreePath?: string;
+  /** Git branch name for this session's worktree */
+  worktreeBranch?: string;
+  /** Allocated port for this session (from .agents.json ports config) */
+  allocatedPort?: number;
 }

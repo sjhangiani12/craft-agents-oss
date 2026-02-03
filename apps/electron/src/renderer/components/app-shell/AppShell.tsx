@@ -496,6 +496,10 @@ function AppShellContent({
   const [isRightSidebarVisible, setIsRightSidebarVisible] = React.useState(() => {
     return storage.get(storage.KEYS.rightSidebarVisible, false)
   })
+  const [rightSidebarPanel, setRightSidebarPanel] = React.useState<import('../../../shared/types').RightSidebarPanel>(() => {
+    const saved = storage.get<string>(storage.KEYS.rightSidebarPanel, 'files')
+    return { type: saved as 'files' | 'terminal' | 'sessionMetadata' }
+  })
   const [rightSidebarWidth, setRightSidebarWidth] = React.useState(() => {
     return storage.get(storage.KEYS.rightSidebarWidth, 300)
   })
@@ -1371,10 +1375,13 @@ function AppShellContent({
     storage.set(storage.KEYS.sidebarVisible, isSidebarVisible)
   }, [isSidebarVisible])
 
-  // Persist right sidebar visibility to localStorage
+  // Persist right sidebar visibility and panel to localStorage
   React.useEffect(() => {
     storage.set(storage.KEYS.rightSidebarVisible, isRightSidebarVisible)
   }, [isRightSidebarVisible])
+  React.useEffect(() => {
+    storage.set(storage.KEYS.rightSidebarPanel, rightSidebarPanel.type)
+  }, [rightSidebarPanel])
 
   // Persist per-view filter map to localStorage
   React.useEffect(() => {
@@ -2938,7 +2945,8 @@ function AppShellContent({
                   style={{ width: rightSidebarWidth }}
                 >
                   <RightSidebar
-                    panel={{ type: 'sessionMetadata' }}
+                    panel={rightSidebarPanel}
+                    onPanelChange={setRightSidebarPanel}
                     sessionId={isChatsNavigation(navState) && navState.details ? navState.details.sessionId : undefined}
                     closeButton={rightSidebarCloseButton}
                   />
@@ -2971,7 +2979,8 @@ function AppShellContent({
                   >
                     <div className="h-full bg-foreground-2 overflow-hidden shadow-strong rounded-[12px]">
                       <RightSidebar
-                        panel={{ type: 'sessionMetadata' }}
+                        panel={rightSidebarPanel}
+                        onPanelChange={setRightSidebarPanel}
                         sessionId={isChatsNavigation(navState) && navState.details ? navState.details.sessionId : undefined}
                         closeButton={rightSidebarCloseButton}
                       />

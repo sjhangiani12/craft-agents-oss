@@ -68,6 +68,12 @@ export interface SessionMeta {
   messageCount?: number
   /** When true, session is hidden from session list (e.g., mini edit sessions) */
   hidden?: boolean
+  /** Git worktree path (if session uses workspace isolation) */
+  worktreePath?: string
+  /** Git branch name for this session's worktree */
+  worktreeBranch?: string
+  /** Allocated port for this session (from .agents.json ports config) */
+  allocatedPort?: number
 }
 
 /**
@@ -122,6 +128,10 @@ export function extractSessionMeta(session: Session): SessionMeta {
     tokenUsage: session.tokenUsage,
     // Hidden sessions (e.g., mini edit sessions in EditPopover)
     hidden: session.hidden,
+    // Worktree isolation fields
+    worktreePath: session.worktreePath,
+    worktreeBranch: session.worktreeBranch,
+    allocatedPort: session.allocatedPort,
   }
 }
 
@@ -150,6 +160,20 @@ export const sessionIdsAtom = atom<string[]>([])
  * Sessions are loaded with empty messages initially, messages are fetched on-demand
  */
 export const loadedSessionsAtom = atom<Set<string>>(new Set<string>())
+
+/**
+ * Worktree status per session (branch, modified count, untracked count)
+ */
+export interface WorktreeStatus {
+  branch: string
+  modified: number
+  untracked: number
+}
+
+export const worktreeStatusAtomFamily = atomFamily(
+  (_sessionId: string) => atom<WorktreeStatus | null>(null),
+  (a, b) => a === b
+)
 
 /**
  * Promise cache for deduplicating concurrent session load requests.

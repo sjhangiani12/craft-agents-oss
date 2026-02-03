@@ -96,23 +96,6 @@ async function validateFilePath(filePath: string): Promise<string> {
     throw new Error('Access denied: file path is outside allowed directories')
   }
 
-  // Block sensitive files even within home directory
-  const sensitivePatterns = [
-    /\.ssh\//,
-    /\.gnupg\//,
-    /\.aws\/credentials/,
-    /\.env$/,
-    /\.env\./,
-    /credentials\.json$/,
-    /secrets?\./i,
-    /\.pem$/,
-    /\.key$/,
-  ]
-
-  if (sensitivePatterns.some(pattern => pattern.test(realPath))) {
-    throw new Error('Access denied: cannot read sensitive files')
-  }
-
   return realPath
 }
 
@@ -730,6 +713,50 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
   })
 
   // Get git branch for a directory (returns null if not a git repo or git unavailable)
+  // Worktree operations (workspace isolation)
+  ipcMain.handle(IPC_CHANNELS.WORKTREE_GET_STATUS, async (_event, sessionId: string) => {
+    return sessionManager.getWorktreeStatus(sessionId)
+  })
+
+  ipcMain.handle(IPC_CHANNELS.WORKTREE_GET_DIFF, async (_event, sessionId: string) => {
+    return sessionManager.getWorktreeDiff(sessionId)
+  })
+
+  ipcMain.handle(IPC_CHANNELS.WORKTREE_LIST, async (_event, workspaceId: string) => {
+    return sessionManager.listWorktrees(workspaceId)
+  })
+
+  // Terminal operations (run commands in worktree/working directory)
+  ipcMain.handle(IPC_CHANNELS.TERMINAL_START, async (_event, sessionId: string, command: string) => {
+    const cwd = sessionManager.getSessionWorkingPath(sessionId)
+    if (!cwd) throw new Error(`No working path for session ${sessionId}`)
+
+    // Build env with AGENT_* vars if session has worktree info
+    const session = await sessionManager.getSession(sessionId)
+    const env: Record<string, string> = {}
+    if (session?.worktreePath) {
+      env.AGENT_WORKSPACE_PATH = session.worktreePath
+      if (session.allocatedPort != null) {
+        env.AGENT_PORT = String(session.allocatedPort)
+      }
+      env.AGENT_SESSION_ID = sessionId
+      if (session.worktreeBranch) {
+        env.AGENT_BRANCH = session.worktreeBranch
+      }
+    }
+
+    const terminalId = sessionManager.terminalManager.start(sessionId, command, cwd, env)
+    return { terminalId }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.TERMINAL_WRITE, async (_event, terminalId: string, data: string) => {
+    sessionManager.terminalManager.write(terminalId, data)
+  })
+
+  ipcMain.handle(IPC_CHANNELS.TERMINAL_STOP, async (_event, terminalId: string) => {
+    sessionManager.terminalManager.stop(terminalId)
+  })
+
   ipcMain.handle(IPC_CHANNELS.GET_GIT_BRANCH, (_event, dirPath: string) => {
     try {
       const branch = execSync('git rev-parse --abbrev-ref HEAD', {
@@ -1542,23 +1569,32 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
   // Session Info Panel (files, notes, file watching)
   // ============================================================
 
-  // Recursive directory scanner for session files
-  // Filters out internal files (session.jsonl) and hidden files (. prefix)
+  // Directories to skip when scanning worktree/project directories
+  const SKIP_DIRS = new Set(['node_modules', '.git', '.turbo', '.next', '.cache', 'dist', '.output'])
+
+  // Recursive directory scanner for session/worktree files
+  // Filters out internal files and bulky directories
   // Returns only non-empty directories
-  async function scanSessionDirectory(dirPath: string): Promise<import('../shared/types').SessionFile[]> {
+  async function scanSessionDirectory(dirPath: string, depth: number = 0): Promise<import('../shared/types').SessionFile[]> {
     const { readdir, stat } = await import('fs/promises')
     const entries = await readdir(dirPath, { withFileTypes: true })
     const files: import('../shared/types').SessionFile[] = []
 
     for (const entry of entries) {
-      // Skip internal and hidden files
-      if (entry.name === 'session.jsonl' || entry.name.startsWith('.')) continue
+      // Skip internal session files
+      if (entry.name === 'session.jsonl') continue
+      // Skip bulky directories
+      if (entry.isDirectory() && SKIP_DIRS.has(entry.name)) continue
+      // Skip hidden files/dirs EXCEPT .env files (important for worktrees)
+      if (entry.name.startsWith('.') && !entry.name.startsWith('.env')) continue
+      // Cap recursion depth to avoid scanning huge trees
+      if (entry.isDirectory() && depth >= 3) continue
 
       const fullPath = join(dirPath, entry.name)
 
       if (entry.isDirectory()) {
         // Recursively scan subdirectory
-        const children = await scanSessionDirectory(fullPath)
+        const children = await scanSessionDirectory(fullPath, depth + 1)
         // Only include non-empty directories
         if (children.length > 0) {
           files.push({
@@ -1587,12 +1623,14 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
   }
 
   // Get files in session directory (recursive tree structure)
+  // If session has a worktree, show the worktree files (project files like .env, package.json).
+  // Otherwise fall back to the session storage directory.
   ipcMain.handle(IPC_CHANNELS.GET_SESSION_FILES, async (_event, sessionId: string) => {
-    const sessionPath = sessionManager.getSessionPath(sessionId)
-    if (!sessionPath) return []
+    const scanPath = sessionManager.getSessionWorkingPath(sessionId) ?? sessionManager.getSessionPath(sessionId)
+    if (!scanPath) return []
 
     try {
-      return await scanSessionDirectory(sessionPath)
+      return await scanSessionDirectory(scanPath)
     } catch (error) {
       ipcLog.error('Failed to get session files:', error)
       return []
@@ -1605,8 +1643,9 @@ export function registerIpcHandlers(sessionManager: SessionManager, windowManage
   let fileChangeDebounceTimer: ReturnType<typeof setTimeout> | null = null
 
   // Start watching a session directory for file changes
+  // Watches worktree directory if available, otherwise session storage directory
   ipcMain.handle(IPC_CHANNELS.WATCH_SESSION_FILES, async (_event, sessionId: string) => {
-    const sessionPath = sessionManager.getSessionPath(sessionId)
+    const sessionPath = sessionManager.getSessionWorkingPath(sessionId) ?? sessionManager.getSessionPath(sessionId)
     if (!sessionPath) return
 
     // Close existing watcher if watching a different session

@@ -1,32 +1,19 @@
 /**
- * SessionMetadataPanel - Session info panel with resizable metadata and files sections
+ * SessionMetadataPanel - Session info panel (name, notes, worktree info)
  *
- * Displays two vertically stacked sections:
- * - Top: Editable session name and notes (auto-saved)
- * - Bottom: Files in the session directory
- *
- * A horizontal resize handle allows adjusting the split between sections.
+ * Displayed as the "Info" tab in the right sidebar.
  */
 
 import * as React from 'react'
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { PanelHeader } from '../app-shell/PanelHeader'
 import { useSession as useSessionData, useAppShellContext } from '@/context/AppShellContext'
 import { Input } from '../ui/input'
 import { Textarea } from '../ui/textarea'
-import { HorizontalResizeHandle } from '../ui/horizontal-resize-handle'
-import { SessionFilesSection } from './SessionFilesSection'
-import * as storage from '@/lib/local-storage'
 
 export interface SessionMetadataPanelProps {
   sessionId?: string
-  closeButton?: React.ReactNode
 }
 
-// Default and constraints for metadata section height
-const DEFAULT_METADATA_HEIGHT = 250
-const MIN_METADATA_HEIGHT = 120
-const MIN_FILES_HEIGHT = 80
 
 /**
  * Custom hook for debounced callback
@@ -69,7 +56,7 @@ function useDebouncedCallback<T extends (...args: any[]) => void>(
 /**
  * Panel displaying session metadata with minimal styling
  */
-export function SessionMetadataPanel({ sessionId, closeButton }: SessionMetadataPanelProps) {
+export function SessionMetadataPanel({ sessionId }: SessionMetadataPanelProps) {
   const { onRenameSession } = useAppShellContext()
   const containerRef = useRef<HTMLDivElement>(null)
 
@@ -77,11 +64,6 @@ export function SessionMetadataPanel({ sessionId, closeButton }: SessionMetadata
   const [name, setName] = useState('')
   const [notes, setNotes] = useState('')
   const [notesLoaded, setNotesLoaded] = useState(false)
-
-  // State for resizable panel split - height of metadata section
-  const [metadataHeight, setMetadataHeight] = useState(() => {
-    return storage.get(storage.KEYS.sessionInfoMetadataHeight, DEFAULT_METADATA_HEIGHT)
-  })
 
   // Get session data
   const session = useSessionData(sessionId || '')
@@ -136,59 +118,28 @@ export function SessionMetadataPanel({ sessionId, closeButton }: SessionMetadata
     debouncedSaveNotes(content)
   }
 
-  // Handle resize - constrain to min heights for both sections
-  const handleResize = useCallback((deltaY: number) => {
-    if (!containerRef.current) return
-
-    const containerHeight = containerRef.current.clientHeight
-    // Account for header (50px) when calculating available space
-    const availableHeight = containerHeight - 50
-
-    setMetadataHeight((prev) => {
-      const newHeight = prev + deltaY
-      // Ensure both sections have minimum heights
-      const maxMetadataHeight = availableHeight - MIN_FILES_HEIGHT
-      return Math.max(MIN_METADATA_HEIGHT, Math.min(maxMetadataHeight, newHeight))
-    })
-  }, [])
-
-  // Save height to localStorage when resize ends
-  const handleResizeEnd = useCallback(() => {
-    storage.set(storage.KEYS.sessionInfoMetadataHeight, metadataHeight)
-  }, [metadataHeight])
-
   // Early return if no sessionId
   if (!sessionId) {
     return (
-      <div className="h-full flex flex-col">
-        <PanelHeader title="Chat Info" actions={closeButton} />
-        <div className="flex-1 flex items-center justify-center text-muted-foreground p-4">
-          <p className="text-sm text-center">No session selected</p>
-        </div>
+      <div className="h-full flex items-center justify-center text-muted-foreground p-4">
+        <p className="text-sm text-center">No session selected</p>
       </div>
     )
   }
 
   if (!session) {
     return (
-      <div className="h-full flex flex-col">
-        <PanelHeader title="Chat Info" actions={closeButton} />
-        <div className="flex-1 flex items-center justify-center text-muted-foreground p-4">
-          <p className="text-sm text-center">Loading session...</p>
-        </div>
+      <div className="h-full flex items-center justify-center text-muted-foreground p-4">
+        <p className="text-sm text-center">Loading session...</p>
       </div>
     )
   }
 
   return (
     <div ref={containerRef} className="h-full flex flex-col">
-      <PanelHeader title="Chat Info" actions={closeButton} />
 
-      {/* Metadata section (Name + Notes) - fixed height based on state */}
-      <div
-        className="shrink-0 overflow-auto p-4 space-y-5"
-        style={{ height: metadataHeight }}
-      >
+      {/* Metadata section (Name + Notes) */}
+      <div className="flex-1 overflow-auto p-4 space-y-5">
         {/* Name */}
         <div>
           <label className="text-xs font-medium text-muted-foreground block mb-1.5 select-none">
@@ -220,17 +171,82 @@ export function SessionMetadataPanel({ sessionId, closeButton }: SessionMetadata
             />
           </div>
         </div>
+
+        {/* Worktree Info (only shown for sessions with workspace isolation) */}
+        {session.worktreeBranch && (
+          <WorktreeInfoSection sessionId={sessionId} session={session} />
+        )}
       </div>
 
-      {/* Horizontal resize handle */}
-      <HorizontalResizeHandle
-        onResize={handleResize}
-        onResizeEnd={handleResizeEnd}
-      />
+    </div>
+  )
+}
 
-      {/* Files section - takes remaining space */}
-      <div className="flex-1 min-h-0 overflow-hidden">
-        <SessionFilesSection sessionId={sessionId} />
+/**
+ * Worktree info section - shows branch, path, modified count, port, and diff button
+ */
+function WorktreeInfoSection({ sessionId, session }: { sessionId: string; session: { worktreeBranch?: string; worktreePath?: string; allocatedPort?: number } }) {
+  const [worktreeStatus, setWorktreeStatus] = useState<{ branch: string; modified: number; untracked: number } | null>(null)
+  const [showDiff, setShowDiff] = useState(false)
+  const [diff, setDiff] = useState<string | null>(null)
+
+  useEffect(() => {
+    window.electronAPI.worktreeGetStatus(sessionId).then(setWorktreeStatus).catch(() => {})
+  }, [sessionId])
+
+  const handleViewDiff = async () => {
+    if (showDiff) {
+      setShowDiff(false)
+      return
+    }
+    const d = await window.electronAPI.worktreeGetDiff(sessionId)
+    setDiff(d || 'No changes')
+    setShowDiff(true)
+  }
+
+  return (
+    <div>
+      <label className="text-xs font-medium text-muted-foreground block mb-1.5 select-none">
+        Workspace Isolation
+      </label>
+      <div className="rounded-lg bg-foreground-2 p-3 space-y-2 text-xs">
+        <div className="flex items-center gap-2">
+          <span className="text-muted-foreground shrink-0">Branch</span>
+          <span className="font-mono text-foreground truncate">{session.worktreeBranch}</span>
+        </div>
+        {session.worktreePath && (
+          <div className="flex items-center gap-2">
+            <span className="text-muted-foreground shrink-0">Path</span>
+            <span className="font-mono text-foreground truncate" title={session.worktreePath}>
+              {session.worktreePath.replace(/^.*\/worktrees\//, '~/.../worktrees/')}
+            </span>
+          </div>
+        )}
+        {worktreeStatus && (
+          <div className="flex items-center gap-2">
+            <span className="text-muted-foreground shrink-0">Files</span>
+            <span className="text-foreground">
+              {worktreeStatus.modified} modified, {worktreeStatus.untracked} untracked
+            </span>
+          </div>
+        )}
+        {session.allocatedPort != null && (
+          <div className="flex items-center gap-2">
+            <span className="text-muted-foreground shrink-0">Port</span>
+            <span className="font-mono text-foreground">{session.allocatedPort}</span>
+          </div>
+        )}
+        <button
+          onClick={handleViewDiff}
+          className="text-xs text-accent hover:underline cursor-pointer mt-1"
+        >
+          {showDiff ? 'Hide diff' : 'View diff'}
+        </button>
+        {showDiff && diff && (
+          <pre className="mt-2 p-2 rounded bg-background text-[10px] font-mono overflow-auto max-h-[200px] whitespace-pre-wrap break-all">
+            {diff}
+          </pre>
+        )}
       </div>
     </div>
   )

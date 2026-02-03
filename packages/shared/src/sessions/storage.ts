@@ -403,6 +403,10 @@ function headerToMetadata(header: SessionHeader, workspaceRootPath: string): Ses
       hasUnread: header.hasUnread,
       // Hidden flag for mini-agent sessions (not shown in session list)
       hidden: header.hidden,
+      // Worktree isolation fields
+      worktreePath: header.worktreePath,
+      worktreeBranch: header.worktreeBranch,
+      allocatedPort: header.allocatedPort,
     };
   } catch {
     return null;
@@ -507,6 +511,9 @@ export async function updateSessionMetadata(
     | 'sharedUrl'
     | 'sharedId'
     | 'model'
+    | 'worktreePath'
+    | 'worktreeBranch'
+    | 'allocatedPort'
   >>
 ): Promise<void> {
   const session = loadSession(workspaceRootPath, sessionId);
@@ -524,6 +531,9 @@ export async function updateSessionMetadata(
   if ('sharedUrl' in updates) session.sharedUrl = updates.sharedUrl;
   if ('sharedId' in updates) session.sharedId = updates.sharedId;
   if (updates.model !== undefined) session.model = updates.model;
+  if (updates.worktreePath !== undefined) session.worktreePath = updates.worktreePath;
+  if (updates.worktreeBranch !== undefined) session.worktreeBranch = updates.worktreeBranch;
+  if (updates.allocatedPort !== undefined) session.allocatedPort = updates.allocatedPort;
 
   await saveSession(session);
 }

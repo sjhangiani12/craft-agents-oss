@@ -24,6 +24,7 @@ export const KEYS = {
   // Right sidebar (chat page)
   rightSidebarVisible: 'right-sidebar-visible',
   rightSidebarWidth: 'right-sidebar-width',
+  rightSidebarPanel: 'right-sidebar-panel',
   sessionInfoMetadataHeight: 'session-info-metadata-height', // Height of metadata section in session info panel
   sessionFilesExpandedFolders: 'session-files-expanded', // Expanded folders in session files tree (keyed by sessionId)
 

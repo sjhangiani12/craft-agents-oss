@@ -52,6 +52,14 @@ import { type ThinkingLevel, DEFAULT_THINKING_LEVEL } from '@craft-agent/shared/
 import { evaluateAutoLabels } from '@craft-agent/shared/labels/auto'
 import { listLabels } from '@craft-agent/shared/labels/storage'
 import { extractLabelId } from '@craft-agent/shared/labels'
+import { WorktreeManager, type WorktreeInfo } from '@craft-agent/shared/worktree'
+import { TerminalManager } from './terminal-manager'
+import { loadAgentsConfig, runWorkspaceScript, PortAllocator, type WorkspaceEnv } from '@craft-agent/shared/workspace-scripts'
+import { homedir } from 'os'
+import { execFile } from 'child_process'
+import { promisify } from 'util'
+
+const execFileAsync = promisify(execFile)
 
 /**
  * Sanitize message content for use as session title.
@@ -366,6 +374,12 @@ interface ManagedSession {
   authRetryInProgress?: boolean
   // Whether this session is hidden from session list (e.g., mini edit sessions)
   hidden?: boolean
+  // Git worktree path (if session uses workspace isolation)
+  worktreePath?: string
+  // Git branch name for this session's worktree
+  worktreeBranch?: string
+  // Allocated port for this session (from .agents.json ports config)
+  allocatedPort?: number
 }
 
 // Convert runtime Message to StoredMessage for persistence
@@ -495,9 +509,109 @@ export class SessionManager {
    * marked as unread when assistant completes - if user is viewing it, don't mark unread.
    */
   private activeViewingSession: Map<string, string> = new Map()
+  // Worktree managers per workspace (keyed by workspace rootPath)
+  private worktreeManagers: Map<string, WorktreeManager> = new Map()
+  // Port allocators per workspace (keyed by workspace rootPath)
+  private portAllocators: Map<string, PortAllocator> = new Map()
+  // Session index counter for port allocation
+  private sessionIndex: number = 0
+  // Terminal manager for running commands in worktrees
+  public terminalManager: TerminalManager
+
+  constructor() {
+    this.terminalManager = new TerminalManager({
+      onOutput: (terminalId, chunk) => {
+        this.broadcastToAllWindows(IPC_CHANNELS.TERMINAL_OUTPUT, { terminalId, chunk })
+      },
+      onExit: (terminalId, exitCode) => {
+        this.broadcastToAllWindows(IPC_CHANNELS.TERMINAL_EXIT, { terminalId, exitCode })
+      },
+    })
+  }
 
   setWindowManager(wm: WindowManager): void {
     this.windowManager = wm
+  }
+
+  private broadcastToAllWindows(channel: string, data: unknown): void {
+    const { BrowserWindow } = require('electron')
+    for (const win of BrowserWindow.getAllWindows()) {
+      win.webContents.send(channel, data)
+    }
+  }
+
+  /**
+   * Get or create a WorktreeManager for a workspace.
+   */
+  private getWorktreeManager(workspace: Workspace): WorktreeManager {
+    const existing = this.worktreeManagers.get(workspace.rootPath)
+    if (existing) return existing
+
+    const worktreeBase = join(homedir(), '.craft-agent', 'worktrees', workspace.id)
+    const manager = new WorktreeManager(workspace.rootPath, worktreeBase)
+    this.worktreeManagers.set(workspace.rootPath, manager)
+    return manager
+  }
+
+  /**
+   * Check if a directory is a git repo root.
+   */
+  private async isGitRepo(dirPath: string): Promise<boolean> {
+    try {
+      await execFileAsync('git', ['rev-parse', '--git-dir'], { cwd: dirPath })
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Get worktree status for a session.
+   */
+  async getWorktreeStatus(sessionId: string): Promise<{ branch: string; modified: number; untracked: number } | null> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed?.worktreePath) return null
+
+    const manager = this.getWorktreeManager(managed.workspace)
+    try {
+      return await manager.getStatus(sessionId)
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Get worktree diff for a session.
+   */
+  async getWorktreeDiff(sessionId: string): Promise<string | null> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed?.worktreePath) return null
+
+    const manager = this.getWorktreeManager(managed.workspace)
+    try {
+      return await manager.getDiff(sessionId)
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * List all worktrees for a workspace.
+   */
+  async listWorktrees(workspaceId: string): Promise<Array<{ path: string; branch: string; sessionId: string }>> {
+    const workspace = getWorkspaceByNameOrId(workspaceId)
+    if (!workspace) return []
+
+    const isGit = await this.isGitRepo(workspace.rootPath)
+    if (!isGit) return []
+
+    const manager = this.getWorktreeManager(workspace)
+    try {
+      const worktrees = await manager.list()
+      return worktrees.map(w => ({ path: w.path, branch: w.branch, sessionId: w.sessionId }))
+    } catch {
+      return []
+    }
   }
 
   /**
@@ -894,6 +1008,10 @@ export class SessionManager {
             sharedUrl: meta.sharedUrl,
             sharedId: meta.sharedId,
             hidden: meta.hidden,
+            // Worktree state - restored from disk for persistence across restarts
+            worktreePath: meta.worktreePath,
+            worktreeBranch: meta.worktreeBranch,
+            allocatedPort: meta.allocatedPort,
           }
 
           this.sessions.set(meta.id, managed)
@@ -944,6 +1062,9 @@ export class SessionManager {
           costUsd: 0,
         },
         hidden: managed.hidden,
+        worktreePath: managed.worktreePath,
+        worktreeBranch: managed.worktreeBranch,
+        allocatedPort: managed.allocatedPort,
       }
 
       // Queue for async persistence with debouncing
@@ -1266,6 +1387,9 @@ export class SessionManager {
         createdAt: m.createdAt,
         messageCount: m.messageCount,
         hidden: m.hidden,
+        worktreePath: m.worktreePath,
+        worktreeBranch: m.worktreeBranch,
+        allocatedPort: m.allocatedPort,
       }))
       .sort((a, b) => b.lastMessageAt - a.lastMessageAt)
   }
@@ -1308,6 +1432,9 @@ export class SessionManager {
       lastMessageRole: m.lastMessageRole,
       tokenUsage: m.tokenUsage,
       hidden: m.hidden,
+      worktreePath: m.worktreePath,
+      worktreeBranch: m.worktreeBranch,
+      allocatedPort: m.allocatedPort,
     }
   }
 
@@ -1365,6 +1492,16 @@ export class SessionManager {
     return getSessionStoragePath(managed.workspace.rootPath, sessionId)
   }
 
+  /**
+   * Get the worktree path for a session (if workspace isolation is enabled).
+   * Falls back to workingDirectory, then null.
+   */
+  getSessionWorkingPath(sessionId: string): string | null {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) return null
+    return managed.worktreePath ?? managed.workingDirectory ?? null
+  }
+
   async createSession(workspaceId: string, options?: import('../shared/types').CreateSessionOptions): Promise<Session> {
     const workspace = getWorkspaceByNameOrId(workspaceId)
     if (!workspace) {
@@ -1416,6 +1553,73 @@ export class SessionManager {
       sessionLog.info(`🤖 Creating mini agent session: model=${resolvedModel}, systemPromptPreset=${options?.systemPromptPreset}`)
     }
 
+    // --- Worktree isolation: create isolated worktree if workspace is a git repo with .agents.json ---
+    let worktreePath: string | undefined
+    let worktreeBranch: string | undefined
+    let allocatedPort: number | undefined
+
+    const isGit = await this.isGitRepo(workspaceRootPath)
+    if (isGit) {
+      const agentsConfig = loadAgentsConfig(workspaceRootPath)
+      if (agentsConfig) {
+        try {
+          const manager = this.getWorktreeManager(workspace)
+          // Generate branch name from session ID
+          const branchName = `agent/${storedSession.id}`
+          const worktreeInfo = await manager.create(storedSession.id, branchName)
+          worktreePath = worktreeInfo.path
+          worktreeBranch = worktreeInfo.branch
+          sessionLog.info(`Created worktree for session ${storedSession.id}: ${worktreePath} (branch: ${worktreeBranch})`)
+
+          // Override working directory to point at the worktree
+          resolvedWorkingDir = worktreePath
+
+          // Allocate port range
+          if (agentsConfig.ports) {
+            // Only create the allocator once per workspace — re-creating wipes tracked ports
+            if (!this.portAllocators.has(workspaceRootPath)) {
+              const portBase = agentsConfig.ports.base ?? 3000
+              const portIncrement = agentsConfig.ports.increment ?? 10
+              this.portAllocators.set(workspaceRootPath, new PortAllocator(portBase, portIncrement))
+            }
+            const allocator = this.portAllocators.get(workspaceRootPath)!
+            allocatedPort = allocator.allocate(this.sessionIndex++)
+          }
+
+          // Run setup script if defined
+          if (agentsConfig.scripts?.setup) {
+            const env: WorkspaceEnv = {
+              AGENT_WORKSPACE_PATH: worktreePath,
+              AGENT_ROOT_PATH: workspaceRootPath,
+              AGENT_PORT: String(allocatedPort ?? 3000),
+              AGENT_SESSION_ID: storedSession.id,
+              AGENT_BRANCH: branchName,
+            }
+            const result = await runWorkspaceScript(
+              agentsConfig.scripts.setup,
+              worktreePath,
+              env,
+              (line) => sessionLog.info(`[setup:${storedSession.id}] ${line}`)
+            )
+            if (result.exitCode !== 0) {
+              sessionLog.warn(`Setup script failed for session ${storedSession.id}: exit ${result.exitCode}\n${result.stderr}`)
+            }
+          }
+
+          // Persist worktree metadata
+          await updateSessionMetadata(workspaceRootPath, storedSession.id, {
+            worktreePath,
+            worktreeBranch,
+            allocatedPort,
+            workingDirectory: resolvedWorkingDir,
+          })
+        } catch (err) {
+          sessionLog.warn(`Failed to create worktree for session ${storedSession.id}:`, err)
+          // Continue without worktree — legacy behavior
+        }
+      }
+    }
+
     const managed: ManagedSession = {
       id: storedSession.id,
       workspace,
@@ -1438,6 +1642,9 @@ export class SessionManager {
       backgroundShellCommands: new Map(),
       messagesLoaded: true,  // New sessions don't need to load messages from disk
       hidden: options?.hidden,
+      worktreePath,
+      worktreeBranch,
+      allocatedPort,
     }
 
     this.sessions.set(storedSession.id, managed)
@@ -1457,6 +1664,9 @@ export class SessionManager {
       thinkingLevel: defaultThinkingLevel,
       sessionFolderPath: getSessionStoragePath(workspaceRootPath, storedSession.id),
       hidden: options?.hidden,
+      worktreePath,
+      worktreeBranch,
+      allocatedPort,
     }
   }
 
@@ -2355,6 +2565,48 @@ export class SessionManager {
     // Dispose agent to clean up ConfigWatchers, event listeners, MCP connections
     if (managed.agent) {
       managed.agent.dispose()
+    }
+
+    // --- Worktree cleanup: run archive script and remove worktree ---
+    if (managed.worktreePath) {
+      try {
+        const agentsConfig = loadAgentsConfig(workspaceRootPath)
+        // Run archive script if defined
+        if (agentsConfig?.scripts?.archive) {
+          const env: WorkspaceEnv = {
+            AGENT_WORKSPACE_PATH: managed.worktreePath,
+            AGENT_ROOT_PATH: workspaceRootPath,
+            AGENT_PORT: String(managed.allocatedPort ?? 3000),
+            AGENT_SESSION_ID: sessionId,
+            AGENT_BRANCH: managed.worktreeBranch ?? '',
+          }
+          const result = await runWorkspaceScript(
+            agentsConfig.scripts.archive,
+            managed.worktreePath,
+            env,
+            (line) => sessionLog.info(`[archive:${sessionId}] ${line}`)
+          )
+          if (result.exitCode !== 0) {
+            sessionLog.warn(`Archive script failed for session ${sessionId}: exit ${result.exitCode}\n${result.stderr}`)
+          }
+        }
+
+        // Remove the worktree and branch
+        const manager = this.getWorktreeManager(managed.workspace)
+        await manager.remove(sessionId)
+        sessionLog.info(`Removed worktree for session ${sessionId}`)
+      } catch (err) {
+        sessionLog.warn(`Failed to clean up worktree for session ${sessionId}:`, err)
+      }
+
+      // Kill any running terminal processes
+      this.terminalManager.dispose(sessionId)
+
+      // Release allocated port
+      if (managed.allocatedPort) {
+        const allocator = this.portAllocators.get(managed.workspace.rootPath)
+        allocator?.release(managed.allocatedPort)
+      }
     }
 
     this.sessions.delete(sessionId)

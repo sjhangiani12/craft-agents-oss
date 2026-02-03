@@ -367,6 +367,12 @@ export interface Session {
   }
   /** When true, session is hidden from session list (e.g., mini edit sessions) */
   hidden?: boolean
+  /** Git worktree path (if session uses workspace isolation) */
+  worktreePath?: string
+  /** Git branch name for this session's worktree */
+  worktreeBranch?: string
+  /** Allocated port for this session (from .agents.json ports config) */
+  allocatedPort?: number
 }
 
 /**
@@ -720,6 +726,18 @@ export const IPC_CHANNELS = {
   WINDOW_FOCUS_STATE: 'window:focusState',  // Broadcast: boolean (isFocused)
   WINDOW_GET_FOCUS_STATE: 'window:getFocusState',
 
+  // Worktree operations (workspace isolation)
+  WORKTREE_GET_STATUS: 'worktree:getStatus',
+  WORKTREE_GET_DIFF: 'worktree:getDiff',
+  WORKTREE_LIST: 'worktree:list',
+
+  // Terminal (run commands in worktree)
+  TERMINAL_START: 'terminal:start',
+  TERMINAL_WRITE: 'terminal:write',
+  TERMINAL_STOP: 'terminal:stop',
+  TERMINAL_OUTPUT: 'terminal:output',   // main → renderer event
+  TERMINAL_EXIT: 'terminal:exit',       // main → renderer event
+
   // Git operations
   GET_GIT_BRANCH: 'git:getBranch',
 
@@ -995,6 +1013,18 @@ export interface ElectronAPI {
   broadcastThemePreferences(preferences: { mode: string; colorTheme: string; font: string }): Promise<void>
   onThemePreferencesChange(callback: (preferences: { mode: string; colorTheme: string; font: string }) => void): () => void
 
+  // Worktree operations (workspace isolation)
+  worktreeGetStatus(sessionId: string): Promise<{ branch: string; modified: number; untracked: number }>
+  worktreeGetDiff(sessionId: string): Promise<string>
+  worktreeList(workspaceId: string): Promise<Array<{ path: string; branch: string; sessionId: string }>>
+
+  // Terminal (run commands in worktree/working directory)
+  terminalStart(sessionId: string, command: string): Promise<{ terminalId: string }>
+  terminalWrite(terminalId: string, data: string): Promise<void>
+  terminalStop(terminalId: string): Promise<void>
+  onTerminalOutput(callback: (data: { terminalId: string; chunk: string }) => void): () => void
+  onTerminalExit(callback: (data: { terminalId: string; exitCode: number | null }) => void): () => void
+
   // Git operations
   getGitBranch(dirPath: string): Promise<string | null>
 
@@ -1098,6 +1128,7 @@ export interface DeepLinkNavigation {
 export type RightSidebarPanel =
   | { type: 'sessionMetadata' }
   | { type: 'files'; path?: string }
+  | { type: 'terminal' }
   | { type: 'history' }
   | { type: 'none' }
 

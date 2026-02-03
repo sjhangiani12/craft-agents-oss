@@ -21,6 +21,9 @@ import { rendererPerf } from '@/lib/perf'
 import { routes } from '@/lib/navigate'
 import { ensureSessionMessagesLoadedAtom, loadedSessionsAtom, sessionMetaMapAtom } from '@/atoms/sessions'
 import { getSessionTitle } from '@/utils/session'
+import { useFileTabs } from '@/hooks/useFileTabs'
+import { FileTabBar } from '@/components/app-shell/FileTabBar'
+import { FileTabContent } from '@/components/app-shell/FileTabContent'
 
 export interface ChatPageProps {
   sessionId: string
@@ -178,11 +181,15 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     await window.electronAPI.sessionCommand(session.id, { type: 'updateWorkingDirectory', dir: path })
   }, [session])
 
+  // File tabs — open files as tabs alongside the chat
+  const fileTabs = useFileTabs()
+
   const handleOpenFile = React.useCallback(
     (path: string) => {
-      onOpenFile(path)
+      // Open as a tab in the chat panel instead of a fullscreen overlay
+      fileTabs.openFile(path)
     },
-    [onOpenFile]
+    [fileTabs]
   )
 
   const handleOpenUrl = React.useCallback(
@@ -513,7 +520,21 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     <>
       <div className="h-full flex flex-col">
         <PanelHeader  title={displayTitle} titleMenu={titleMenu} actions={shareButton} rightSidebarButton={rightSidebarButton} isRegeneratingTitle={isAsyncOperationOngoing} />
+
+        {/* File tab bar (only shown when files are open) */}
+        <FileTabBar
+          tabs={fileTabs.tabs}
+          activeTabId={fileTabs.activeTabId}
+          onSelectTab={fileTabs.setActiveTab}
+          onCloseTab={fileTabs.closeTab}
+          sessionName={displayTitle}
+        />
+
         <div className="flex-1 flex flex-col min-h-0">
+          {/* Show file content when a file tab is active, chat otherwise */}
+          {fileTabs.activeTabId && fileTabs.tabs.find(t => t.id === fileTabs.activeTabId) ? (
+            <FileTabContent tab={fileTabs.tabs.find(t => t.id === fileTabs.activeTabId)!} />
+          ) : (
           <ChatDisplay
             ref={chatDisplayRef}
             session={session}
@@ -556,6 +577,7 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
             isSearchModeActive={isSearchModeActive}
             onMatchInfoChange={onChatMatchInfoChange}
           />
+          )}
         </div>
       </div>
       <RenameDialog

@@ -428,6 +428,32 @@ const api: ElectronAPI = {
       ipcRenderer.removeListener(IPC_CHANNELS.NOTIFICATION_NAVIGATE, handler)
     }
   },
+  // Worktree operations (workspace isolation)
+  worktreeGetStatus: (sessionId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.WORKTREE_GET_STATUS, sessionId),
+  worktreeGetDiff: (sessionId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.WORKTREE_GET_DIFF, sessionId),
+  worktreeList: (workspaceId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.WORKTREE_LIST, workspaceId),
+
+  // Terminal (run commands in worktree/working directory)
+  terminalStart: (sessionId: string, command: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.TERMINAL_START, sessionId, command),
+  terminalWrite: (terminalId: string, data: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.TERMINAL_WRITE, terminalId, data),
+  terminalStop: (terminalId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.TERMINAL_STOP, terminalId),
+  onTerminalOutput: (callback: (data: { terminalId: string; chunk: string }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: { terminalId: string; chunk: string }) => callback(data)
+    ipcRenderer.on(IPC_CHANNELS.TERMINAL_OUTPUT, handler)
+    return () => { ipcRenderer.removeListener(IPC_CHANNELS.TERMINAL_OUTPUT, handler) }
+  },
+  onTerminalExit: (callback: (data: { terminalId: string; exitCode: number | null }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: { terminalId: string; exitCode: number | null }) => callback(data)
+    ipcRenderer.on(IPC_CHANNELS.TERMINAL_EXIT, handler)
+    return () => { ipcRenderer.removeListener(IPC_CHANNELS.TERMINAL_EXIT, handler) }
+  },
+
   getGitBranch: (dirPath: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.GET_GIT_BRANCH, dirPath),
 
